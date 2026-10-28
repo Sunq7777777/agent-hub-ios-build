@@ -55,7 +55,6 @@ jobs:
             -configuration Release \
             -sdk iphoneos \
             -destination 'generic/platform=iOS' \
-            -arch arm64 \
             -derivedDataPath source/.build/iphone \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
@@ -73,7 +72,7 @@ jobs:
           import subprocess
           from pathlib import Path
 
-          app = Path('source/.build/iphone/Build/Products/Release-iphoneos/CodexManage.app')
+          app = Path('source/.build/iphone/Build/Products/Release-iphoneos/Agent Hub.app')
           if not app.is_dir():
               raise SystemExit('Expected physical-device app was not produced')
           bundles = [app, *sorted(app.glob('PlugIns/*.appex'))]
@@ -108,7 +107,7 @@ jobs:
           Path('artifacts/build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
           PY
           mkdir -p package/Payload
-          ditto source/.build/iphone/Build/Products/Release-iphoneos/CodexManage.app package/Payload/CodexManage.app
+          ditto 'source/.build/iphone/Build/Products/Release-iphoneos/Agent Hub.app' 'package/Payload/Agent Hub.app'
           (cd package && ditto -c -k --keepParent Payload ../artifacts/AgentHub-iPhone-unsigned.ipa)
           unzip -t artifacts/AgentHub-iPhone-unsigned.ipa > artifacts/archive-check.txt
           (cd artifacts && shasum -a 256 AgentHub-iPhone-unsigned.ipa > SHA256SUMS.txt)
