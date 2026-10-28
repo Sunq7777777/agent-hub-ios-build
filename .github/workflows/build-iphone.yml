@@ -1,0 +1,149 @@
+name: Build Agent Hub for iPhone
+
+"on":
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths: [.github/workflows/build-iphone.yml]
+
+permissions:
+  contents: read
+
+jobs:
+  iphone:
+    runs-on: xcode-27
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      SOURCE_SHA: c66f3cd6db34c7992fa033f817d6eb508a0383bd
+    steps:
+      - name: Check out the pinned public source
+        uses: actions/checkout@v4
+        with:
+          repository: easyaigc/agent-hub
+          ref: c66f3cd6db34c7992fa033f817d6eb508a0383bd
+          path: source
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: source/.node-version
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Prepare the SDK required by the shared Kotlin project
+        uses: android-actions/setup-android@v4
+        with:
+          cmdline-tools-version: "15859902"
+          packages: platform-tools
+
+      - name: Build for a physical iPhone
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          test "$(git -C source rev-parse HEAD)" = "$SOURCE_SHA"
+          xcodebuild -version > artifacts/toolchain.txt
+          node --version >> artifacts/toolchain.txt
+          xcodebuild \
+            -project source/apps/ios/CodexManage.xcodeproj \
+            -scheme CodexManage \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -arch arm64 \
+            -derivedDataPath source/.build/iphone \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            DEVELOPMENT_TEAM= \
+            build 2>&1 | tee artifacts/build.log
+
+      - name: Verify the device app and package an unsigned IPA
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import json
+          import os
+          import plistlib
+          import subprocess
+          from pathlib import Path
+
+          app = Path('source/.build/iphone/Build/Products/Release-iphoneos/CodexManage.app')
+          if not app.is_dir():
+              raise SystemExit('Expected physical-device app was not produced')
+          bundles = [app, *sorted(app.glob('PlugIns/*.appex'))]
+          verified = []
+          for bundle in bundles:
+              with (bundle / 'Info.plist').open('rb') as stream:
+                  info = plistlib.load(stream)
+              if info.get('DTPlatformName') != 'iphoneos':
+                  raise SystemExit(f'Not an iPhone device bundle: {bundle.name}')
+              if 'iPhoneOS' not in info.get('CFBundleSupportedPlatforms', []):
+                  raise SystemExit(f'Unsupported bundle platform: {bundle.name}')
+              executable = bundle / info['CFBundleExecutable']
+              archs = subprocess.check_output(
+                  ['xcrun', 'lipo', '-archs', str(executable)], text=True
+              ).strip().split()
+              if archs != ['arm64']:
+                  raise SystemExit(f'Unexpected architectures: {bundle.name}: {archs}')
+              verified.append({
+                  'bundle': bundle.name,
+                  'bundleIdentifier': info['CFBundleIdentifier'],
+                  'minimumOSVersion': info.get('MinimumOSVersion'),
+                  'architectures': archs,
+              })
+          manifest = {
+              'sourceRepository': 'https://github.com/easyaigc/agent-hub',
+              'sourceCommit': os.environ['SOURCE_SHA'],
+              'workflowRun': os.environ['GITHUB_SERVER_URL'] + '/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'],
+              'signingStatus': 'unsigned; must be signed before installation',
+              'physicalDeviceAcceptance': 'not performed',
+              'bundles': verified,
+          }
+          Path('artifacts/build-manifest.json').write_text(json.dumps(manifest, indent=2) + '\n')
+          PY
+          mkdir -p package/Payload
+          ditto source/.build/iphone/Build/Products/Release-iphoneos/CodexManage.app package/Payload/CodexManage.app
+          (cd package && ditto -c -k --keepParent Payload ../artifacts/AgentHub-iPhone-unsigned.ipa)
+          unzip -t artifacts/AgentHub-iPhone-unsigned.ipa > artifacts/archive-check.txt
+          (cd artifacts && shasum -a 256 AgentHub-iPhone-unsigned.ipa > SHA256SUMS.txt)
+          cat > artifacts/INSTALL.txt <<'TXT'
+          This IPA targets physical arm64 iPhones running iOS 17 or later.
+          It is unsigned and cannot be installed by tapping a browser link.
+          It must first be signed for the intended Apple account/device, for example using Sideloadly.
+          The original app and its extensions are preserved. Free-account entitlement and notification compatibility must be verified during installation.
+          No physical iPhone installation or functional acceptance has been performed by this build.
+          TXT
+          cat >> "$GITHUB_STEP_SUMMARY" <<'TXT'
+          The physical-device IPA has been built and structurally checked.
+          Download the AgentHub-iPhone artifact below. The IPA still requires Apple signing before installation.
+          Physical-device installation and app behavior have not been verified.
+          TXT
+
+      - name: Upload the IPA and provenance
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentHub-iPhone
+          path: |
+            artifacts/AgentHub-iPhone-unsigned.ipa
+            artifacts/SHA256SUMS.txt
+            artifacts/build-manifest.json
+            artifacts/toolchain.txt
+            artifacts/archive-check.txt
+            artifacts/INSTALL.txt
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Preserve build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: AgentHub-iPhone-build-log
+          path: artifacts/build.log
+          if-no-files-found: ignore
+          retention-days: 7
